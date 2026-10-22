@@ -6,22 +6,21 @@
  *   @dsh-remote/protocol/dist/src/wire/payloads.js    cmd.* / ev.* payloads (sealed)
  *   @dsh-remote/plugin/dist/bundle/index.js           C2H='c2h', H2C='h2c'
  *
- * Flow:  hello{role:client,protocol:1} → hello-ok → pair-begin-client{token} → paired
- *        → derive kC2H/kH2C → WAIT for the host's first sealed frame (ev.host_info)
- *        → only then may we send commands.
+ * Two lifecycles, deliberately separated:
+ *   PAIR    hello → pair-begin-client{6-digit code} → paired{convId,hostId}
+ *           → derive keys → WAIT for the host's first sealed frame → commands allowed
+ *   RESUME  hello → derive keys from the *stored* convId → commands immediately
+ *           (no pairing: the 6-digit code is single-use and long expired)
  *
- * Two rules this client must not break (the host enforces both, silently):
- *   1. Sending an uplink `enc` for an unknown conversation voids the pairing.
- *      A freshly paired convId is not registered on the host until it has derived
- *      its keys, so we stay quiet until its first frame arrives.
- *   2. Two consecutive undecryptable frames void the pairing outright. So decryption
- *      correctness is a hard requirement, not a nice-to-have (proved in test-crypto).
+ * Rules the host enforces, silently:
+ *   1. An uplink `enc` for a conversation it has not registered voids the pairing.
+ *      So a freshly paired convId stays quiet until the host speaks first.
+ *   2. Two consecutive undecryptable frames void the pairing outright.
  *
- * Nonce choice: the protocol's client direction uses a counter nonce bound to an
- * install id. In a browser the counter resets on page reload while the install id
- * persists in localStorage, which would reuse (key, nonce) — catastrophic for
- * XSalsa20. The host does not validate the prefix, and the receiver always reads the
- * nonce out of the record, so we send a fresh random 24-byte nonce per frame.
+ * Nonce: the protocol's client direction uses a counter nonce bound to an install id.
+ * A browser counter resets on reload while the install id persists, which would reuse
+ * (key, nonce) — fatal for XSalsa20. The host does not validate the prefix and the
+ * receiver reads the nonce out of the record, so we send a fresh random nonce.
  */
 import { derivePskKey, seal, open, toBase64, randomBytes, NONCE_BYTES } from './crypto.js';
 
@@ -54,6 +53,16 @@ export function parsePairingUri(text) {
   };
 }
 
+/** Drop the one-time pairing code from a URI so it is never replayed on resume. */
+export function stripPairingToken(uri) {
+  const raw = String(uri ?? '').trim();
+  if (!raw.startsWith('dshr:/p?')) return raw;
+  const cut = raw.indexOf('?');
+  const head = raw.slice(0, cut + 1);
+  const parts = raw.slice(cut + 1).split('&').filter((p) => p && !p.startsWith('t='));
+  return head + parts.join('&');
+}
+
 const newId = (prefix) => prefix + toBase64(randomBytes(9)).replace(/[^A-Za-z0-9]/g, '').slice(0, 12);
 
 export class RemoteClient {
@@ -62,36 +71,58 @@ export class RemoteClient {
    * @param {(payload: any) => void} handlers.onPayload  decrypted ev.* payload
    * @param {(state: string, detail?: string) => void} handlers.onStatus
    * @param {(line: string, level?: string) => void} handlers.onLog
+   * @param {(s: {convId: string, hostId: string|null, clientId: string|null}) => void} handlers.onSession
+   *        a conversation exists — the caller should persist it for RESUME
+   * @param {(reason: string) => void} handlers.onSessionLost  conversation is gone; re-pair needed
    */
   constructor(handlers = {}) {
     this.onPayload = handlers.onPayload ?? (() => {});
     this.onStatus = handlers.onStatus ?? (() => {});
     this.onLog = handlers.onLog ?? (() => {});
+    this.onSession = handlers.onSession ?? (() => {});
+    this.onSessionLost = handlers.onSessionLost ?? (() => {});
 
     this.ws = null;
-    this.pairing = null;      // parsed URI
+    this.pairing = null;
     this.convId = null;       // pairing channel id (c_xxx) == paired.sessionId
     this.hostId = null;
     this.clientId = null;     // authoritative id from hello-ok
-    this.kC2H = null;         // outbound key
-    this.kH2C = null;         // inbound key
+    this.kC2H = null;
+    this.kH2C = null;
     this.seq = 0;
     this.pingTimer = null;
     this.reconnectTimer = null;
     this.closedByUser = false;
-    /** Commands are refused until the host has proved it can talk to us. */
     this.canCommand = false;
-    this.badFramesInARow = 0;
     this.warnedBadFrame = false;
+    this.resumed = false;
   }
 
   log(line, level = 'info') { this.onLog(line, level); }
 
-  async start(pairingUri) {
+  /**
+   * @param {string} pairingUri  full URI (with `t=`) to pair, or a stored URI (token
+   *                             stripped) to resume
+   * @param {{convId?: string, hostId?: string, clientId?: string}|null} saved
+   *        stored conversation state; when present the pairing code is never used
+   */
+  async start(pairingUri, saved = null) {
     const parsed = parsePairingUri(pairingUri);
     if (!parsed) throw new Error('配对 URI 无法识别（应以 dshr:/p? 开头，且含 s= 与 psk=）');
     this.pairing = parsed;
     this.closedByUser = false;
+
+    if (saved?.convId) {
+      this.convId = saved.convId;
+      this.hostId = saved.hostId ?? null;
+      this.clientId = saved.clientId ?? null;
+      // Keys must exist before the socket opens: the resume path sends commands as
+      // soon as hello-ok arrives.
+      await this.deriveKeys();
+      this.resumed = true;
+      this.log(`恢复上次的通道 ${this.convId}，无需重新配对`);
+    }
+
     await this.openSocket();
   }
 
@@ -102,6 +133,16 @@ export class RemoteClient {
     this.ws = null;
     this.canCommand = false;
     this.onStatus('stopped');
+  }
+
+  /** Reconnect if the socket is unusable — call on visibilitychange / focus. */
+  ensureConnected() {
+    if (this.closedByUser || !this.pairing) return;
+    const state = this.ws?.readyState;
+    if (state === 0 || state === 1) return; // CONNECTING / OPEN
+    this.log('检测到连接已断开，重连中…');
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.openSocket().catch((e) => this.log('重连失败：' + e.message, 'error'));
   }
 
   clearTimers() {
@@ -125,15 +166,14 @@ export class RemoteClient {
 
       ws.onopen = () => {
         this.onStatus('open', url);
-        const hello = {
+        this.sendRaw({
           t: 'hello',
           role: 'client',
           protocol: PROTOCOL_VERSION,
           clientId: this.clientId ?? newId('cli-'),
           clientMeta: { platform: 'web', label: 'dsh-remote-web' },
           ...(this.hostId ? { hostId: this.hostId } : {}),
-        };
-        this.sendRaw(hello);
+        });
         if (!settled) { settled = true; resolve(); }
       };
 
@@ -175,11 +215,10 @@ export class RemoteClient {
         this.log(`中继已登记：clientId=${this.clientId} protocol=${frame.protocol}`);
 
         if (this.convId && this.kC2H) {
-          // Reconnect to a conversation the host already knows: the documented resume
-          // path is to go straight to cmd.list_sessions, which also triggers the host's
-          // "client rejoined" handling.
+          // RESUME: the host already knows this conversation, so uplink is safe now.
           this.canCommand = true;
-          this.onStatus('ready', 'reconnected');
+          this.onSession({ convId: this.convId, hostId: this.hostId, clientId: this.clientId });
+          this.onStatus('ready', this.resumed ? 'resumed' : 'reconnected');
           this.startPing();
           this.sendCommand({ t: 'cmd.list_sessions', cmdId: newId('cmd-') });
           this.sendCommand({ t: 'cmd.get_pending', cmdId: newId('cmd-') });
@@ -189,8 +228,8 @@ export class RemoteClient {
           this.sendRaw({ t: 'pair-begin-client', pairingToken: this.pairing.token });
           this.onStatus('pairing');
         } else {
-          this.log('配对 URI 里没有 6 位配对码（t=），无法配对', 'error');
-          this.onStatus('no-token');
+          this.log('没有可用的配对码，也没有可恢复的通道 —— 需要重新配对', 'error');
+          this.onStatus('need-repair', '没有已保存的通道');
         }
         return;
       }
@@ -201,9 +240,9 @@ export class RemoteClient {
         this.onStatus('deriving');
         this.deriveKeys()
           .then(() => {
-            // Deliberately NOT ready to command yet: the host has not registered this
-            // conversation, and an early uplink frame voids the pairing.
+            // Quiet until the host speaks: an early uplink frame voids the pairing.
             this.onStatus('waiting-host');
+            this.onSession({ convId: this.convId, hostId: this.hostId, clientId: this.clientId });
             this.log(`已配对，通道 ${this.convId}（host ${this.hostId}）；等待主机的第一帧`);
             this.startPing();
           })
@@ -216,8 +255,8 @@ export class RemoteClient {
 
       case 'pair-fail': {
         const zh = {
-          invalid_or_expired: '配对码无效或已过期（请在 pill 上重新生成）',
-          already_used: '配对码已被使用',
+          invalid_or_expired: '配对码无效或已过期（请在电脑上重新生成）',
+          already_used: '配对码已被使用过（请在电脑上重新生成）',
           host_offline: '主机不在线',
           bad_token: '配对码错误',
         };
@@ -240,7 +279,7 @@ export class RemoteClient {
 
       case 'peer-left':
         this.log(frame.unpaired ? '主机已解除配对' : '主机离线（会话保留，可重连）', 'warn');
-        if (frame.unpaired) { this.canCommand = false; this.convId = null; this.kC2H = null; this.kH2C = null; }
+        if (frame.unpaired) this.forgetSession('主机已解除配对');
         this.onStatus(frame.unpaired ? 'unpaired' : 'host-left');
         return;
 
@@ -254,14 +293,12 @@ export class RemoteClient {
       case 'error': {
         this.log(`中继错误：${frame.code}${frame.message ? ' — ' + frame.message : ''}`, 'error');
         if (frame.code === 'unknown_session' || frame.code === 'not_member') {
-          // The only signals that mean "the pairing is gone".
-          this.convId = null;
-          this.kC2H = null;
-          this.kH2C = null;
-          this.canCommand = false;
-          this.onStatus('need-repair', frame.message ?? frame.code);
+          // The only signals that legitimately mean "the pairing is gone".
+          this.forgetSession(frame.message ?? frame.code);
         } else if (frame.code === 'unsupported_protocol') {
           this.onStatus('error', frame.message ?? '协议版本不匹配');
+        } else if (frame.code === 'host_unavailable') {
+          this.onStatus('host-left', '主机暂时不可用');
         } else {
           this.onStatus('error', frame.code);
         }
@@ -273,21 +310,30 @@ export class RemoteClient {
     }
   }
 
+  forgetSession(reason) {
+    this.convId = null;
+    this.kC2H = null;
+    this.kH2C = null;
+    this.canCommand = false;
+    this.resumed = false;
+    this.onSessionLost(reason);
+    this.onStatus('need-repair', reason);
+  }
+
   handleRecord(item) {
     if (!this.kH2C) return;
     const payload = open(this.kH2C, item);
     if (!payload) {
-      this.badFramesInARow += 1;
       if (!this.warnedBadFrame) {
         this.warnedBadFrame = true;
         this.log('有帧解不开（密钥/通道不匹配）— 主机连续两帧解不开会作废配对', 'warn');
       }
       return;
     }
-    this.badFramesInARow = 0;
+    this.warnedBadFrame = false;
 
     if (!this.canCommand) {
-      // First readable frame from the host: it has registered us, so uplink is safe now.
+      // First readable frame: the host has registered us, uplink is safe.
       this.canCommand = true;
       this.onStatus('ready', 'paired');
       this.log('主机已通，开始拉取会话');
@@ -317,7 +363,6 @@ export class RemoteClient {
     }
     const record = seal(this.kC2H, payload, randomBytes(NONCE_BYTES));
     this.seq += 1;
-    // The relay injects clientId itself; sending our own is at best redundant.
     return this.sendRaw({ t: 'enc', sessionId: this.convId, seq: this.seq, ciphertext: record.ciphertext });
   }
 
