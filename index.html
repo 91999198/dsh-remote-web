@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#101418" />
+<link rel="manifest" href="./manifest.webmanifest" />
+<link rel="icon" type="image/svg+xml" href="./icon.svg" />
+<link rel="apple-touch-icon" href="./icon.svg" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="DSH 远控" />
+<title>DSH 远控 · 网页客户端</title>
+<style>
+  :root {
+    --bg: #0d1116;
+    --panel: #151b22;
+    --panel-2: #1b232c;
+    --line: #2a343f;
+    --text: #e6edf3;
+    --dim: #8b9bad;
+    --accent: #4aa8ff;
+    --ok: #35c27f;
+    --warn: #e0a52b;
+    --err: #e5574f;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .badge {
+    margin-left: auto; font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--dim); white-space: nowrap;
+  }
+  .badge[data-tone="ok"] { color: #0d1116; background: var(--ok); border-color: transparent; }
+  .badge[data-tone="warn"] { color: #0d1116; background: var(--warn); border-color: transparent; }
+  .badge[data-tone="err"] { color: #fff; background: var(--err); border-color: transparent; }
+
+  main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+  .pair { padding: 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .pair[hidden] { display: none; }
+  .pair label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 6px; }
+  .pair textarea {
+    width: 100%; min-height: 74px; resize: vertical; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 10px;
+  }
+  .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: 14px; padding: 9px 14px; border-radius: 10px; cursor: pointer;
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  }
+  button:active { transform: scale(0.985); }
+  button.primary { background: var(--accent); color: #06121f; border-color: transparent; font-weight: 600; }
+  button.ghost { background: transparent; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .hint { font-size: 12px; color: var(--dim); margin-top: 8px; }
+  .hint code { color: var(--text); background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
+
+  .sessions { border-bottom: 1px solid var(--line); background: var(--panel); max-height: 32vh; overflow: auto; }
+  .sessions .hd { font-size: 12px; color: var(--dim); padding: 8px 14px 4px; }
+  .sess {
+    display: flex; align-items: center; gap: 8px; padding: 9px 14px; cursor: pointer;
+    border-top: 1px solid var(--line);
+  }
+  .sess[aria-current="true"] { background: var(--panel-2); }
+  .sess .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: none; }
+  .sess .dot[data-running="true"] { background: var(--ok); }
+  .sess .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  .sess .meta { font-size: 11px; color: var(--dim); flex: none; }
+
+  .feed { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px 18px; display: flex; flex-direction: column; gap: 8px; }
+  .line { font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+  .msg { padding: 8px 11px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); }
+  .msg.user { background: #12222f; border-color: #1d3345; }
+  .tool {
+    font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; color: var(--dim);
+    border-left: 2px solid var(--line); padding: 2px 0 2px 10px; white-space: pre-wrap; word-break: break-word;
+  }
+  .tool[data-phase="completed"] { border-left-color: var(--ok); }
+  .tool[data-phase="failed"] { border-left-color: var(--err); }
+  .sys { font-size: 12px; color: var(--dim); }
+  .sys[data-tone="warn"] { color: var(--warn); }
+  .sys[data-tone="err"] { color: var(--err); }
+
+  .card { border: 1px solid var(--warn); border-radius: var(--radius); padding: 12px; background: #1e1a10; }
+  .card.question { border-color: var(--accent); background: #101b26; }
+  .card h3 { margin: 0 0 6px; font-size: 14px; }
+  .card p { margin: 0 0 10px; font-size: 13px; color: var(--text); white-space: pre-wrap; }
+  .card .opts { display: flex; gap: 8px; flex-wrap: wrap; }
+  .card input[type="text"] {
+    width: 100%; padding: 9px 11px; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--text); font: inherit; font-size: 14px; margin: 8px 0 0;
+  }
+
+  .composer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 14px; display: flex; gap: 8px; }
+  .composer textarea {
+    flex: 1; resize: none; min-height: 42px; max-height: 30vh;
+    background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; font: inherit; font-size: 15px;
+  }
+  .composer button { flex: none; align-self: flex-end; }
+  .logs {
+    border-top: 1px solid var(--line); background: #0a0e12; max-height: 26vh; overflow: auto;
+    font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; padding: 8px 14px; color: var(--dim);
+  }
+  .logs[hidden] { display: none; }
+  .logs div[data-level="warn"] { color: var(--warn); }
+  .logs div[data-level="error"] { color: var(--err); }
+  .toolbar { display: flex; gap: 8px; padding: 6px 14px; border-top: 1px solid var(--line); background: var(--panel); }
+  .toolbar button { font-size: 12px; padding: 6px 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DSH 远控</h1>
+  <span id="status" class="badge" data-tone="warn">未连接</span>
+</header>
+
+<main>
+  <section id="pairPanel" class="pair">
+    <label for="uri">粘贴主机 pill 上的配对 URI（<code>dshr:/p?…</code>）</label>
+    <textarea id="uri" placeholder="dshr:/p?v=1&s=wss://drc.provid.cc&n=dsh-host&psk=…&t=123456" spellcheck="false"></textarea>
+    <div class="row">
+      <button id="connect" class="primary">连接并配对</button>
+      <button id="forget" class="ghost">清除已保存</button>
+    </div>
+    <div class="hint">配对码 120 秒内有效。配对成功后 URI 会存在本机浏览器里，下次直接连接。</div>
+  </section>
+
+  <section id="sessions" class="sessions" hidden></section>
+  <section id="feed" class="feed"></section>
+
+  <div class="composer" id="composer" hidden>
+    <textarea id="prompt" placeholder="给 DSH 下命令…" rows="1"></textarea>
+    <button id="send" class="primary">发送</button>
+  </div>
+
+  <div class="toolbar">
+    <button id="toggleLogs" class="ghost">日志</button>
+    <button id="refresh" class="ghost">刷新会话</button>
+    <button id="interrupt" class="ghost">中断当前</button>
+  </div>
+  <div id="logs" class="logs" hidden></div>
+</main>
+
+<script src="./vendor/nacl-fast.js"></script>
+<script type="module" src="./app/app.js"></script>
+</body>
+</html>
