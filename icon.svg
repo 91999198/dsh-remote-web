@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="DSH 远控">
+  <rect width="512" height="512" rx="112" fill="#0d1116"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#2a343f" stroke-width="18"/>
+  <circle cx="256" cy="256" r="96" fill="none" stroke="#4aa8ff" stroke-width="18" opacity="0.55"/>
+  <circle cx="256" cy="256" r="40" fill="#4aa8ff"/>
+  <path d="M256 106a150 150 0 0 1 106 44" fill="none" stroke="#35c27f" stroke-width="18" stroke-linecap="round"/>
+  <path d="M256 406a150 150 0 0 1-106-44" fill="none" stroke="#35c27f" stroke-width="18" stroke-linecap="round"/>
+</svg>

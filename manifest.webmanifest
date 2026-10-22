@@ -1,0 +1,13 @@
+{
+  "name": "DSH 远控",
+  "short_name": "DSH 远控",
+  "description": "在手机/iPad 上查看 DeepSeek Harness 的进度并下命令",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0d1116",
+  "theme_color": "#101418",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
