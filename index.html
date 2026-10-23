@@ -116,6 +116,12 @@
 
   .feed { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 20px 28px; }
   .feed-inner { max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  /* history pages stack above the live tail; each page is its own flex column so the
+     message spacing rules still apply inside it */
+  #olderPages { display: flex; flex-direction: column; gap: 14px; }
+  #olderPages:empty { display: none; }
+  #liveFeed { display: flex; flex-direction: column; gap: 14px; }
+  .page { display: flex; flex-direction: column; gap: 14px; }
 
   .turn { display: flex; flex-direction: column; gap: 4px; }
   .turn.user { align-items: flex-end; }
@@ -135,6 +141,73 @@
   .note { font-size: 12px; color: var(--label-caption); }
   .note[data-tone="warn"] { color: #f3c274; }
   .note[data-tone="err"] { color: #f09a9a; }
+
+  /* ── rendered markdown (app/markdown.js) ─────────────────── */
+  .bubble > *:first-child { margin-top: 0; }
+  .bubble > *:last-child { margin-bottom: 0; }
+  .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 {
+    margin: 16px 0 8px; line-height: 1.35; font-weight: 600;
+  }
+  .bubble h1 { font-size: 19px; }
+  .bubble h2 { font-size: 17px; }
+  .bubble h3 { font-size: 15.5px; }
+  .bubble h4, .bubble h5, .bubble h6 { font-size: 15px; color: var(--label-secondary); }
+  .bubble p { margin: 0 0 10px; }
+  .bubble ul, .bubble ol { margin: 0 0 10px; padding-left: 22px; }
+  .bubble li { margin: 3px 0; }
+  .bubble blockquote {
+    margin: 0 0 10px; padding: 2px 12px;
+    border-left: 2px solid var(--border-l2); color: var(--label-tertiary);
+  }
+  .bubble code { font: 12.5px/1.5 var(--mono); background: var(--bg-layer-2); padding: 1px 5px; border-radius: 5px; }
+  .bubble a { color: #79b8ff; text-decoration: none; border-bottom: 1px solid #79b8ff55; }
+  .bubble hr { border: 0; border-top: 1px solid var(--border-l1); margin: 14px 0; }
+  .md-table {
+    border-collapse: collapse; width: 100%; margin: 0 0 12px; font-size: 13.5px;
+    display: block; overflow-x: auto;
+  }
+  .md-table th, .md-table td {
+    border: 1px solid var(--border-l2); padding: 6px 10px; text-align: left; vertical-align: top;
+  }
+  .md-table th { background: var(--bg-layer-2); font-weight: 600; }
+
+  .code {
+    border: 1px solid var(--border-l2); border-radius: 10px; overflow: hidden;
+    margin: 0 0 12px; background: #101011;
+  }
+  .code-head {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    font: 11px/1.4 var(--mono); color: var(--label-caption); background: var(--bg-layer-2);
+  }
+  .code-toggle {
+    margin-left: auto; font-size: 11px; color: var(--label-tertiary);
+    padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border-l2);
+  }
+  .code-toggle:hover { background: var(--hover); }
+  .code-body { margin: 0; padding: 10px 12px; overflow-x: auto; }
+  .code-body code {
+    background: none; padding: 0; font: 12.5px/1.6 var(--mono);
+    color: var(--label-secondary); white-space: pre;
+  }
+  .code-body.collapsed { max-height: 168px; overflow-y: hidden; position: relative; }
+  .code-body.collapsed::after {
+    content: ''; position: absolute; inset: auto 0 0 0; height: 40px;
+    background: linear-gradient(#10101100, #101011);
+  }
+
+  /* collapsible tool rows */
+  .tool.expandable { cursor: pointer; }
+  .tool .tool-detail { margin-top: 4px; color: var(--label-caption); }
+  .tool:not(.open) .tool-detail { display: none; }
+  .tool .tool-more { color: var(--label-caption); font-size: 11px; margin-left: 6px; }
+
+  .load-earlier {
+    display: block; width: 100%; margin: 0 0 14px; padding: 9px; border-radius: 10px;
+    font-size: 13px; color: var(--label-tertiary); border: 1px dashed var(--border-l2);
+  }
+  .load-earlier:hover { background: var(--hover); color: var(--label-secondary); }
+  .load-earlier[hidden] { display: none; }
+  .badge { cursor: pointer; }
 
   .card {
     border: 1px solid #f59e0b55; background: #f59e0b12; border-radius: var(--radius);
@@ -263,7 +336,11 @@
     </header>
 
     <section class="feed" id="feed">
-      <div class="feed-inner" id="feedInner"></div>
+      <div class="feed-inner" id="feedInner">
+        <button type="button" class="load-earlier" id="loadEarlier" hidden>加载更早的消息</button>
+        <div id="olderPages"></div>
+        <div id="liveFeed"></div>
+      </div>
     </section>
 
     <div class="composer" id="composer" hidden>

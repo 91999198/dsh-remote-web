@@ -96,6 +96,8 @@ export class RemoteClient {
     this.canCommand = false;
     this.warnedBadFrame = false;
     this.resumed = false;
+    /** Consecutive reconnect attempts; drives the backoff. */
+    this.attempt = 0;
   }
 
   log(line, level = 'info') { this.onLog(line, level); }
@@ -145,6 +147,17 @@ export class RemoteClient {
     this.openSocket().catch((e) => this.log('重连失败：' + e.message, 'error'));
   }
 
+  /** Drop the socket and reconnect immediately — for a manual "重试" tap. */
+  forceReconnect() {
+    if (this.closedByUser || !this.pairing) return;
+    this.clearTimers();
+    this.attempt = 0;
+    this.canCommand = false;
+    this.log('手动重连…');
+    try { this.ws?.close(); } catch {}
+    this.openSocket().catch((e) => this.log('重连失败：' + e.message, 'error'));
+  }
+
   clearTimers() {
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
@@ -165,6 +178,7 @@ export class RemoteClient {
       let settled = false;
 
       ws.onopen = () => {
+        this.attempt = 0;
         this.onStatus('open', url);
         this.sendRaw({
           t: 'hello',
@@ -192,11 +206,15 @@ export class RemoteClient {
         this.canCommand = false;
         if (!settled) { settled = true; reject(new Error('WebSocket 连接失败（code ' + ev.code + '）')); return; }
         if (this.closedByUser) return;
-        this.onStatus('closed', 'code ' + ev.code);
-        this.log(`连接断开（code ${ev.code}），${RECONNECT_MS / 1000}s 后重连`, 'warn');
+        // The relay is a third party and does go down; back off instead of hammering it.
+        this.attempt += 1;
+        const backoff = Math.min(30_000, RECONNECT_MS * 2 ** (this.attempt - 1));
+        const delay = backoff + Math.floor(Math.random() * 800);
+        this.onStatus('closed', `code ${ev.code} · 第 ${this.attempt} 次重试，${Math.round(delay / 1000)}s 后`);
+        this.log(`连接断开（code ${ev.code}），${(delay / 1000).toFixed(0)}s 后重连（第 ${this.attempt} 次）`, 'warn');
         this.reconnectTimer = setTimeout(() => {
           this.openSocket().catch((e) => this.log('重连失败：' + e.message, 'error'));
-        }, RECONNECT_MS);
+        }, delay);
       };
     });
   }
